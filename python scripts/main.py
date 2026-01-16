@@ -55,7 +55,7 @@ if os.path.exists(CONFIG_FILE):
             Z_THRESHOLD_PUT = float(config.get("Z_THRESHOLD_PUT", Z_THRESHOLD_PUT))
             VOL_THRESHOLD = float(config.get("VOL_THRESHOLD", VOL_THRESHOLD))
     except Exception:
-        pass # Fall back to defaults on error
+        pass 
 
 class TradeManager:
     def __init__(self):
@@ -105,17 +105,14 @@ def get_best_option_contract(symbol, stock_price, direction):
 def get_live_metrics():
     """Calculates live sensors for the XGBoost model with stabilized indicators."""
     try:
-        # Fetching 5 days to provide EMA "warm-up"
         df = yf.download(SYMBOL, period="5d", interval="1m", progress=False)
         if df.empty: return None
         if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
         
-        # EMA calculations
         ema_12 = df['Close'].ewm(span=12, adjust=False).mean()
         ema_26 = df['Close'].ewm(span=26, adjust=False).mean()
         macd = ema_12 - ema_26
         
-        # Z-Score and ATR calculations
         m_z = (macd - macd.rolling(30).mean()) / macd.rolling(30).std()
         v_z = (df['Volume'] - df['Volume'].rolling(30).mean()) / df['Volume'].rolling(30).std()
         
@@ -124,7 +121,6 @@ def get_live_metrics():
         
         vol_proxy = df['Close'].pct_change().rolling(30).std().iloc[-1] * np.sqrt(252 * 390)
         
-        # Ensure we get the latest non-zero volume (yfinance 1m can lag)
         raw_vol = df['Volume'].replace(0, np.nan).ffill().iloc[-1]
         if pd.isna(raw_vol): raw_vol = 0
         
@@ -137,13 +133,12 @@ def get_live_metrics():
             "atr": float(atr), 
             "implied_vol": float(vol_proxy)
         }
-    except Exception as e:
+    except Exception:
         return None
 
 def update_dashboard(data, prob, mins_open, opt_info=None):
-    # Time formatting for 12-hour clock
-    now = datetime.now()
-    timestamp = now.strftime("%I:%M:%S %p")
+    now_dt = datetime.now()
+    timestamp = now_dt.strftime("%I:%M:%S %p")
     
     # Determine color and status message based on market hours
     if mins_open < START_TIME_MIN:
@@ -151,21 +146,14 @@ def update_dashboard(data, prob, mins_open, opt_info=None):
         status_msg = "Market Opens Next: 9:30 AM" if mins_open < 0 else "Market Warm-up (Wait until 9:45 AM)"
     elif START_TIME_MIN <= mins_open < ENTRY_CUTOFF_MIN:
         time_color = "green"
-        if mins_open >= (ENTRY_CUTOFF_MIN - 20):
-            status_msg = "WARNING: Entry Window Closing Soon"
-        else:
-            status_msg = "Market Open: Entry Window Active"
+        status_msg = "WARNING: Entry Window Closing Soon" if mins_open >= (ENTRY_CUTOFF_MIN - 20) else "Market Open: Entry Window Active"
     elif ENTRY_CUTOFF_MIN <= mins_open < HARD_EXIT_MIN:
         time_color = "yellow"
-        if mins_open >= (HARD_EXIT_MIN - 15):
-            status_msg = "WARNING: Hard Exit Approaching"
-        else:
-            status_msg = "Monitoring Exits Only (No New Entries)"
+        status_msg = "WARNING: Hard Exit Approaching" if mins_open >= (HARD_EXIT_MIN - 15) else "Monitoring Exits Only (No New Entries)"
     else:
         time_color = "red"
         status_msg = "Market Closed - No Active Monitoring"
 
-    # Create the unified table with dynamic title
     title_str = f"[bold cyan]AMD Options Control Center[/] | [{time_color}]Last Update: {timestamp}[/] | [white]{status_msg}[/]"
     table = Table(title=title_str, expand=True)
     table.add_column("Sensor/Action", style="white")
@@ -181,9 +169,11 @@ def update_dashboard(data, prob, mins_open, opt_info=None):
     raw_m = data['raw_macd']
     vol_z = data.get('v_z', 0)
     
+    # Logic: Keep metrics visible even when ACTIVE
     if tm.in_position:
         direction_val = f"[bold green]ACTIVE {tm.trade_direction}[/]"
-        logic_note = f"Exit when Z reaches 0.0"
+        # Updated to show Exit Target PLUS live metrics
+        logic_note = f"Exit Target: Z->0.0 | Z: {z_val:+.2f} | MACD: {raw_m:+.3f} | VZ: {vol_z:+.2f}"
     else:
         direction_val = f"{'Call' if z_val < 0 else 'Put'} Watch"
         logic_note = f"Z: {z_val:+.2f} | MACD: {raw_m:+.3f} | VZ: {vol_z:+.2f}"
