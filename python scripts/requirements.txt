@@ -1,0 +1,10 @@
+pandas
+numpy
+yfinance
+joblib
+rich
+requests
+scipy
+python-dotenv
+xgboost
+scikit-learn
