@@ -4,65 +4,45 @@ import numpy as np
 import yfinance as yf
 import joblib
 import os
+import json
 from rich.live import Live
 from rich.table import Table
 from rich.panel import Panel
 from market_physics import MarketPhysics
-
-# CONFIG
-SYMBOL = "AMD"
-MODEL_FILE = "sota_brain.pkl"
+from datetime import datetime
 
 class LiveTrader:
     def __init__(self):
-        self.model = joblib.load(MODEL_FILE) if os.path.exists(MODEL_FILE) else None
-        self.status = "Initializing..."
+        with open("strategy_config.json", "r") as f:
+            self.config = json.load(f)
+        self.model = joblib.load("sota_brain.pkl") if os.path.exists("sota_brain.pkl") else None
         
     def get_live_physics(self):
-        # We need last 60 candles for physics
-        df = yf.download(SYMBOL, period="5d", interval="1m", progress=False)
+        df = yf.download(self.config['SYMBOL'], period="5d", interval="1m", progress=False)
         if len(df) < 60: return None
         
-        # Strip MultiIndex if present
         if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
-        
         last_60 = df['Close'].values[-60:]
         
         hurst = MarketPhysics.get_hurst_exponent(last_60)
-        theta, mu, sigma = MarketPhysics.fit_ornstein_uhlenbeck(last_60)
+        theta, mu, _ = MarketPhysics.fit_ornstein_uhlenbeck(last_60)
         
-        current_price = last_60[-1]
-        divergence = current_price - mu
-        # Approximate local vol
+        curr_price = last_60[-1]
         local_vol = np.std(last_60)
-        z_score = divergence / local_vol if local_vol > 0 else 0
+        z_score = (curr_price - mu) / local_vol if local_vol > 0 else 0
         
         vol_annual = df['Close'].pct_change().std() * np.sqrt(252*390)
         
         return {
-            'price': current_price,
-            'hurst': hurst,
-            'theta': theta,
-            'mu': mu,
-            'z_score': z_score,
-            'vol': vol_annual,
-            'hour': datetime.now().hour
+            'price': curr_price, 'hurst': hurst, 'theta': theta,
+            'z_score': z_score, 'vol': vol_annual, 'hour': datetime.now().hour
         }
 
-    def predict_trade(self, physics):
+    def predict(self, data):
         if not self.model: return 0.0
-        
-        # Match feature order from train_brain.py
-        # ['hurst', 'theta', 'z_score', 'volatility', 'hour']
-        features = pd.DataFrame([[
-            physics['hurst'],
-            physics['theta'],
-            physics['z_score'],
-            physics['vol'],
-            physics['hour']
-        ]], columns=['hurst', 'theta', 'z_score', 'volatility', 'hour'])
-        
-        return self.model.predict_proba(features)[0][1]
+        feat = pd.DataFrame([[data['hurst'], data['theta'], data['z_score'], data['vol'], data['hour']]], 
+                            columns=['hurst', 'theta', 'z_score', 'volatility', 'hour'])
+        return self.model.predict_proba(feat)[0][1]
 
     def run(self):
         with Live(refresh_per_second=1) as live:
@@ -74,39 +54,37 @@ class LiveTrader:
                         time.sleep(5)
                         continue
                         
-                    prob = self.predict_trade(data)
+                    prob = self.predict(data)
                     
-                    # Dashboard
-                    table = Table(title=f"[bold cyan]{SYMBOL} Physics Engine[/]")
-                    table.add_column("Metric")
+                    table = Table(title=f"[bold cyan]{self.config['SYMBOL']} Physics Engine (SOTA)[/]")
+                    table.add_column("Sensor")
                     table.add_column("Value")
-                    table.add_column("Interpretation")
+                    table.add_column("State")
                     
-                    # Hurst (Regime)
-                    h_color = "green" if data['hurst'] < 0.45 else "red"
-                    h_msg = "MEAN REVERTING" if data['hurst'] < 0.45 else "TRENDING/RANDOM"
-                    table.add_row("Hurst Exponent", f"[{h_color}]{data['hurst']:.3f}[/]", h_msg)
+                    # Hurst
+                    h_lim = self.config['HURST_THRESHOLD']
+                    h_state = "[green]MEAN REVERTING[/]" if data['hurst'] < h_lim else "[red]TRENDING[/]"
+                    table.add_row("Regime (Hurst)", f"{data['hurst']:.3f}", h_state)
                     
-                    # Theta (Speed)
-                    t_color = "green" if data['theta'] > 0.05 else "yellow"
-                    table.add_row("OU Theta (Speed)", f"[{t_color}]{data['theta']:.4f}[/]", "High = Fast Snapback")
+                    # Theta
+                    t_lim = self.config['THETA_THRESHOLD']
+                    t_state = "[green]FAST[/]" if data['theta'] > t_lim else "[yellow]SLUGGISH[/]"
+                    table.add_row("Reversion Speed", f"{data['theta']:.4f}", t_state)
                     
-                    # Divergence
-                    div_color = "magenta" if abs(data['z_score']) > 2.0 else "white"
-                    table.add_row("OU Z-Score", f"[{div_color}]{data['z_score']:.2f}[/]", "Deviation from Mu")
+                    # Z-Score
+                    z_color = "magenta" if abs(data['z_score']) > 2 else "white"
+                    table.add_row("Deviation (Z)", f"[{z_color}]{data['z_score']:.2f}[/]", "Entry > 2.0")
                     
-                    # ML Brain
-                    ml_color = "green" if prob > 0.75 else "white"
-                    table.add_row("ML Confidence", f"[{ml_color}]{prob:.1%}[/]", "Prob of Win")
+                    # AI
+                    ai_state = "[bold green]HIGH CONFIDENCE[/]" if prob > 0.8 else "WAIT"
+                    table.add_row("AI Confidence", f"{prob:.1%}", ai_state)
                     
                     live.update(Panel(table))
                     time.sleep(5)
-                    
                 except Exception as e:
                     live.update(Panel(f"[red]Error: {e}[/]"))
                     time.sleep(5)
 
-from datetime import datetime
 if __name__ == "__main__":
     lt = LiveTrader()
     lt.run()
