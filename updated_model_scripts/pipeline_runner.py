@@ -31,24 +31,29 @@ def main():
     # (Data Manager automatically truncates data older than BACKTEST_WINDOW_DAYS)
     run("data_manager.py")
     
-    # 2. Hyperparameter Optimization (NEW STEP)
-    # (Finds the best thresholds for the current regime via Bayesian Search)
+    # 2. Walk-Forward Analysis (Robustness Validation)
+    # (Checks if the strategy holds up on unseen data. CRITICAL SAFETY STEP.)
+    run("walk_forward_analysis.py")
+    
+    # 3. Hyperparameter Optimization
+    # (Finds the best thresholds for the CURRENT regime via Bayesian Search)
     run("optimize_hyperparameters.py")
     
-    # 3. Simulate Strategy
+    # 4. Simulate Strategy
     # (Generates training samples using the newly OPTIMIZED config)
     run("backtest_engine.py")
     
-    # 4. Retrain Brain
+    # 5. Retrain Brain
     # (Fits the XGBoost model to the new volatility regime)
     run("train_brain.py")
     
     console.print(Panel(
         "[bold green]System Update Complete![/]\n\n"
-        "1. Data Refreshed (Last 180 Days)\n"
-        "2. Strategy Thresholds Optimized (Bayesian Search)\n"
-        "3. Backtest Simulation Run\n"
-        "4. ML Brain Re-Trained\n\n"
+        "1. Data Refreshed\n"
+        "2. WFA Validation Complete\n"
+        "3. Thresholds Optimized\n"
+        "4. Backtest Run\n"
+        "5. ML Model Trained\n\n"
         "[yellow]You are ready to run 'live_trader.py'[/]",
         border_style="green"
     ))
