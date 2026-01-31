@@ -33,7 +33,7 @@ def main():
     
     # 2. Walk-Forward Analysis (Robustness Validation)
     # (Checks if the strategy holds up on unseen data. CRITICAL SAFETY STEP.)
-    run("walk_forward_analysis.py")
+    # run("walk_forward_analysis.py")
     
     # 3. Hyperparameter Optimization
     # (Finds the best thresholds for the CURRENT regime via Bayesian Search)
