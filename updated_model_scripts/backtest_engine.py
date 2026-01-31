@@ -20,9 +20,9 @@ class BacktestEngine:
                 "HURST_THRESHOLD": 0.45,
                 "THETA_THRESHOLD": 0.05, 
                 "SIGMA_ENTRY": 2.0,
-                "STOP_LOSS_ATR": 3.0,     # Widened for Scaling room
-                "SCALE_IN_ATR": 1.0,      # Step size for scaling
-                "MAX_CONTRACTS": 5,       # Cap scaling at 5 (Safety)
+                "STOP_LOSS_ATR": 3.0,
+                "SCALE_IN_ATR": 1.0,
+                "MAX_CONTRACTS": 5,
                 "TARGET_EXPIRY_DAYS": 4,
                 "INITIAL_SIZE": 1
             }
@@ -32,9 +32,9 @@ class BacktestEngine:
 
     def run_simulation(self, silent=False):
         if not silent:
-            console.print("[bold cyan]Running SOTA 'Smart Scaling' Simulation...[/]")
+            console.print("[bold cyan]Running SOTA 'HMM Regime' Simulation...[/]")
         
-        required = ['atr', 'macd_z', 'rsi', 'dist_vwap', 'adx']
+        required = ['atr', 'macd_z', 'rsi', 'dist_vwap', 'adx', 'regime']
         if not all(col in self.df.columns for col in required):
             if not silent: console.print(f"[bold red]CRITICAL ERROR: Columns {required} missing.[/]")
             return 0.0
@@ -58,16 +58,24 @@ class BacktestEngine:
             row = self.df.iloc[i]
             ts = row.name
             
-            # --- 1. FILTERS ---
+            # --- 1. SOTA TIMING FILTERS ---
             is_event = row['volatility'] > (1.8 * row['vol_baseline'])
             is_friday_pm = (ts.dayofweek == 4 and ts.hour >= 12)
-            is_late = (ts.hour >= 14) # No new campaigns after 2 PM
+            is_late = (ts.hour >= 14)
             
             if is_event or is_friday_pm or is_late: continue
+
+            # --- 2. HMM REGIME FILTER (NEW) ---
+            # Regime 0: Calm (Reverting) - IDEAL
+            # Regime 1: Volatile (Trending) - CAUTION
+            # Regime 2: Extreme (Crash) - AVOID
+            if row['regime'] == 2: continue
+            
+            # --- 3. PHYSICS FILTERS ---
             if row['hurst'] > HURST_MAX: continue
             if row['ou_theta'] < THETA_MIN: continue
                 
-            # --- 2. SIGNAL ---
+            # --- 4. SIGNAL ---
             local_vol = self.df['Close'].iloc[i-30:i].std()
             if local_vol == 0: continue
             
@@ -80,6 +88,7 @@ class BacktestEngine:
             if direction:
                 pnl = self.simulate_campaign(i, direction)
                 trades.append({
+                    'regime': row['regime'], # Track for AI
                     'hurst': row['hurst'],
                     'theta': row['ou_theta'],
                     'z_score': z_score,
@@ -117,7 +126,6 @@ class BacktestEngine:
     def simulate_campaign(self, idx, direction):
         """
         Executes a trade using 'Regime-Gated Scaling'.
-        Allows averaging down IF AND ONLY IF Physics says market is still reverting.
         """
         entry_row = self.df.iloc[idx]
         strike = round(entry_row['Close'])
@@ -130,7 +138,7 @@ class BacktestEngine:
         # Scaling Params
         MAX_CONTRACTS = self.config.get('MAX_CONTRACTS', 5)
         SCALE_STEP_DIST = self.config.get('SCALE_IN_ATR', 1.0) * atr
-        STOP_DIST = self.config.get('STOP_LOSS_ATR', 3.0) * atr # Hard stop relative to AVG entry
+        STOP_DIST = self.config.get('STOP_LOSS_ATR', 3.0) * atr
         
         contracts = self.config.get('INITIAL_SIZE', 1)
         opt_type = direction.lower()
@@ -140,7 +148,6 @@ class BacktestEngine:
         total_cost = (entry_opt_price * contracts * 100)
         avg_stock_entry = entry_row['Close']
         
-        # Max Hold: 4 Hours (Give it time to revert)
         future = self.df.iloc[idx+1 : idx+240] 
         
         for j, (ts, curr_row) in enumerate(future.iterrows()):
@@ -148,37 +155,35 @@ class BacktestEngine:
             curr_opt_price = MarketPhysics.get_bs_price(curr_row['Close'], strike, t_curr, rf, bs_vol, opt_type)
             current_net_value = (curr_opt_price * contracts * 100)
             
-            # --- SCALING LOGIC (The "Old Model" Magic) ---
+            # --- SCALING LOGIC ---
             moved_against = False
             if direction == 'Call' and curr_row['Close'] < (avg_stock_entry - SCALE_STEP_DIST): moved_against = True
             elif direction == 'Put' and curr_row['Close'] > (avg_stock_entry + SCALE_STEP_DIST): moved_against = True
             
             if moved_against and contracts < MAX_CONTRACTS:
-                # SOTA GATE: Only scale if Hurst < 0.55 (Market is NOT trending)
-                if curr_row['hurst'] < 0.55:
+                # SOTA GATE: Scale ONLY if in Regime 0 (Low Vol) AND Hurst is low
+                if curr_row['regime'] == 0 and curr_row['hurst'] < 0.55:
                     contracts += 1
                     total_cost += (curr_opt_price * 100)
-                    # Update average entry price
                     avg_stock_entry = (avg_stock_entry * (contracts-1) + curr_row['Close']) / contracts
             
-            # --- EXIT 1: Mean Reversion (Profit) ---
+            # --- EXIT 1: Mean Reversion ---
             curr_div = curr_row['Close'] - curr_row['ou_mu']
             reverted = (direction == 'Call' and curr_div >= 0) or (direction == 'Put' and curr_div <= 0)
-            
             if reverted:
-                # If profitable, exit. If scaling trapped us, hold until scratch or stop.
                 if current_net_value > total_cost:
                     return current_net_value - total_cost
 
-            # --- EXIT 2: Hard Stop (Relative to Average Entry) ---
+            # --- EXIT 2: Hard Stop ---
             stop_hit = False
             if direction == 'Call' and curr_row['Close'] < (avg_stock_entry - STOP_DIST): stop_hit = True
             if direction == 'Put' and curr_row['Close'] > (avg_stock_entry + STOP_DIST): stop_hit = True
             if stop_hit: return current_net_value - total_cost
             
-            # --- EXIT 3: Regime Break (The "New Model" Safety) ---
-            # If Hurst spikes massively (> 0.65), the rubber band snapped. Get out.
-            if curr_row['hurst'] > 0.65: return current_net_value - total_cost
+            # --- EXIT 3: Regime Break ---
+            # If we enter Regime 2 (Crash) or Hurst spikes, get out.
+            if curr_row['regime'] == 2 or curr_row['hurst'] > 0.65:
+                return current_net_value - total_cost
             
             # --- EXIT 4: EOD ---
             if ts.hour == 15 and ts.minute >= 55: return current_net_value - total_cost
