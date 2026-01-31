@@ -15,7 +15,7 @@ SYMBOL = "AMD"
 POLYGON_API_KEY = os.getenv("POLYGON_API_KEY")
 RISK_FREE_RATE = 0.045
 TARGET_EXPIRY_DAYS = 7
-LOOKBACK_DAYS = 480
+LOOKBACK_DAYS = 180
 CACHE_FILE = f"{SYMBOL}_historical_data_cache.csv"
 CONFIG_FILE = "strategy_params.json"
 
@@ -65,7 +65,7 @@ def get_bs_price(S, K, T, r, sigma, option_type='call'):
     else:
         return K * np.exp(-r * T) * norm.cdf(-d2) - S * norm.cdf(-d1)
 
-# --- 3. CAMPAIGN SIMULATOR ---
+# --- 3. CAMPAIGN SIMULATOR (Updated for P&L) ---
 def simulate_campaign(df, start_idx):
     entry_row = df.iloc[start_idx]
     atr = entry_row['atr']
@@ -96,22 +96,28 @@ def simulate_campaign(df, start_idx):
             contracts += 1
             total_cost += curr_opt_price * 1 * 100
             
+        current_value = curr_opt_price * contracts * 100
+        pnl = current_value - total_cost
+
         # Exit Condition: Reversion to Mean (Z crosses 0)
         if (direction == 1 and curr_row['macd_z'] >= 0) or (direction == -1 and curr_row['macd_z'] <= 0):
-            if (curr_opt_price * contracts * 100) > (total_cost * 1.01): 
-                return 1
-            elif i > 120: # If stuck for 2 hours, exit at break-even if possible
-                return 1 if (curr_opt_price * contracts * 100) > total_cost else 0
+            if current_value > (total_cost * 1.01): 
+                return pnl
+            elif i > 120: # If stuck for 2 hours, exit
+                return pnl
             
         # Exit: Stop Loss
         stop_hit = (direction == 1 and curr_row['Close'] < (entry_row['Close'] - (atr * ATR_MULT))) or \
                    (direction == -1 and curr_row['Close'] > (entry_row['Close'] + (atr * ATR_MULT)))
-        if stop_hit: return 0 
+        if stop_hit: 
+            return pnl
             
         # Exit: EOD (3:55 PM)
         if ts.hour == 15 and ts.minute >= 55:
-            return 1 if (curr_opt_price * contracts * 100) > total_cost else 0
-    return 0
+            return pnl
+
+    # If loop finishes without exit (rare), force close
+    return (curr_opt_price * contracts * 100) - total_cost
 
 # --- 4. DATA FETCHING & CACHING ---
 def get_polygon_data(days_back=180):
@@ -175,7 +181,7 @@ def run_backtest():
     
     df['mins_open'] = (df.index.hour * 60 + df.index.minute) - (9 * 60 + 30)
     
-    # --- SIGNAL LOGIC (Using the synchronized params) ---
+    # --- SIGNAL LOGIC ---
     df['signal'] = 0
     df.loc[(df['macd_z'] < -Z_THRESHOLD_CALL) & (df['vol_z'] > VOL_THRESHOLD), 'signal'] = 1
     df.loc[(df['macd_z'] > Z_THRESHOLD_PUT) & (df['vol_z'] > VOL_THRESHOLD), 'signal'] = 1
@@ -191,16 +197,18 @@ def run_backtest():
         loc = df.index.get_loc(idx)
         if loc > len(df) - 241: continue
         
-        result = simulate_campaign(df, loc)
+        pnl = simulate_campaign(df, loc)
         vol = df['Close'].pct_change().rolling(30).std().iloc[loc] * np.sqrt(252 * 390)
         
+        # We store 'pnl' for financial analysis AND 'target' for the ML classifier
         training_rows.append({
             'atr': df.at[idx,'atr'], 
             'mins_open': df.at[idx,'mins_open'], 
             'macd_z': df.at[idx,'macd_z'], 
             'vol_z': df.at[idx,'vol_z'], 
             'implied_vol': vol, 
-            'target': result
+            'pnl': round(pnl, 2),
+            'target': 1 if pnl > 0 else 0
         })
         
     pd.DataFrame(training_rows).to_csv("historical_training_data.csv", index=False)

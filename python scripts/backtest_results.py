@@ -4,13 +4,22 @@ import os
 from rich.console import Console
 from rich.table import Table
 from rich.panel import Panel
+from rich.text import Text
 
 console = Console()
 
-def analyze_dual_direction_results():
+def color_pnl(value):
+    """Returns a colored string for P&L values."""
+    if value > 0:
+        return f"[bold green]+${value:,.2f}[/]"
+    elif value < 0:
+        return f"[bold red]-${abs(value):,.2f}[/]"
+    else:
+        return f"[white]${value:,.2f}[/]"
+
+def analyze_financial_results():
     """
-    Analyzes dual-direction results from backtest.py.
-    Differentiates between Call (Oversold) and Put (Overbought) campaigns.
+    Analyzes backtest results with a focus on P&L (Profit & Loss).
     """
     file_path = "historical_training_data.csv"
     
@@ -20,70 +29,100 @@ def analyze_dual_direction_results():
 
     df = pd.read_csv(file_path)
     
-    # 1. Label Trade Types based on MACD Z-score
-    # In backtest.py: Z < 0 is Call (Oversold), Z > 0 is Put (Overbought)
+    # 1. Label Trade Types
     df['trade_type'] = df['macd_z'].apply(lambda x: 'Call (Oversold)' if x < 0 else 'Put (Overbought)')
     
-    # 2. General Metrics
-    total_campaigns = len(df)
-    wins = df[df['target'] == 1]
-    losses = df[df['target'] == 0]
-    win_rate = (len(wins) / total_campaigns) * 100 if total_campaigns > 0 else 0
-    profit_factor = len(wins) / len(losses) if len(losses) > 0 else float('inf')
+    # 2. Financial Metrics Calculation
+    total_trades = len(df)
+    total_pnl = df['pnl'].sum()
+    avg_pnl = df['pnl'].mean()
+    
+    wins = df[df['pnl'] > 0]
+    losses = df[df['pnl'] <= 0]
+    
+    win_rate = (len(wins) / total_trades) * 100 if total_trades > 0 else 0
+    avg_win = wins['pnl'].mean() if not wins.empty else 0
+    avg_loss = losses['pnl'].mean() if not losses.empty else 0
+    
+    # Profit Factor (Gross Profit / Gross Loss)
+    gross_profit = wins['pnl'].sum()
+    gross_loss = abs(losses['pnl'].sum())
+    profit_factor = gross_profit / gross_loss if gross_loss > 0 else float('inf')
 
-    # 3. Summary Table
-    summary_table = Table(title="[bold cyan]AMD Dual-Direction Options Strategy Audit")
+    # Drawdown Calculation (Simple Peak-to-Valley)
+    df['cumulative_pnl'] = df['pnl'].cumsum()
+    df['peak'] = df['cumulative_pnl'].cummax()
+    df['drawdown'] = df['cumulative_pnl'] - df['peak']
+    max_drawdown = df['drawdown'].min()
+
+    # 3. Main Financial Summary Table
+    summary_table = Table(title=f"[bold cyan]AMD Options Strategy: Financial Audit[/]")
     summary_table.add_column("Metric", style="white")
-    summary_table.add_column("Value", style="bold magenta")
-    summary_table.add_column("Assessment", justify="right")
+    summary_table.add_column("Value", justify="right", style="bold magenta")
+    summary_table.add_column("Context", style="italic white")
 
-    summary_table.add_row("Total Campaigns", str(total_campaigns), "Statistically Robust")
-    summary_table.add_row("Global Win Rate", f"{win_rate:.2f}%", "[green]Target: >70%[/]" if win_rate > 70 else "[red]Needs Tuning[/]")
-    summary_table.add_row("Global Profit Factor", f"{profit_factor:.2f}", "Healthy" if profit_factor > 1.5 else "Risky")
+    summary_table.add_row("Total P&L", color_pnl(total_pnl), "Net Profit across all trades")
+    summary_table.add_row("Total Trades", str(total_trades), "Sample Size")
+    summary_table.add_row("Win Rate", f"{win_rate:.1f}%", f"{len(wins)} Wins / {len(losses)} Losses")
+    summary_table.add_row("Avg P&L per Trade", color_pnl(avg_pnl), "Expectancy")
+    summary_table.add_row("Avg Win", color_pnl(avg_win), "Avg gain on winning trades")
+    summary_table.add_row("Avg Loss", color_pnl(avg_loss), "Avg loss on losing trades")
+    summary_table.add_row("Profit Factor", f"{profit_factor:.2f}", "> 1.5 is ideal")
+    summary_table.add_row("Max Drawdown", color_pnl(max_drawdown), "Worst decline from equity peak")
+
     console.print(summary_table)
 
-    # 4. Trade Type Breakdown
-    type_table = Table(title="[bold yellow]Trade Type Comparison (Calls vs Puts)")
+    # 4. Breakdown by Trade Type (Call vs Put)
+    type_table = Table(title="[bold yellow]P&L Breakdown by Trade Direction[/]")
     type_table.add_column("Type", style="cyan")
-    type_table.add_column("Signals", justify="center")
+    type_table.add_column("Count", justify="center")
     type_table.add_column("Win Rate", justify="right")
-    type_table.add_column("Avg MACD Z", justify="right")
+    type_table.add_column("Total P&L", justify="right")
+    type_table.add_column("Avg P&L", justify="right")
 
     for t_type in df['trade_type'].unique():
         sub = df[df['trade_type'] == t_type]
-        wr = (sub['target'].mean()) * 100
-        avg_z = sub['macd_z'].mean()
-        type_table.add_row(t_type, str(len(sub)), f"{wr:.1f}%", f"{avg_z:.2f}")
+        sub_wr = (len(sub[sub['pnl'] > 0]) / len(sub)) * 100
+        sub_total = sub['pnl'].sum()
+        sub_avg = sub['pnl'].mean()
+        
+        type_table.add_row(
+            t_type, 
+            str(len(sub)), 
+            f"{sub_wr:.1f}%", 
+            color_pnl(sub_total), 
+            color_pnl(sub_avg)
+        )
     
     console.print(type_table)
 
-    # 5. Hourly Performance
-    df['hour_from_open'] = (df['mins_open'] // 60).astype(int)
-    hourly_stats = df[df['hour_from_open'] <= 6].groupby('hour_from_open')['target'].agg(['count', 'mean'])
+    # 5. Top Winners and Losers
+    top_wins = df.nlargest(3, 'pnl')
+    top_losses = df.nsmallest(3, 'pnl')
     
-    hour_table = Table(title="[bold white]Hourly Heatmap (Performance by Time)")
-    hour_table.add_column("Hour", style="cyan")
-    hour_table.add_column("Volume of Trades", justify="center")
-    hour_table.add_column("Win Rate", justify="right")
-    
-    for hour, row in hourly_stats.iterrows():
-        wr = row['mean'] * 100
-        color = "green" if wr > 75 else "yellow" if wr > 60 else "red"
-        hour_table.add_row(f"Hour {int(hour)}", str(int(row['count'])), f"[{color}]{wr:.1f}%[/]")
-    
-    console.print(hour_table)
+    ext_table = Table(title="[bold white]Extreme Outliers (Best & Worst)[/]")
+    ext_table.add_column("Rank", style="white")
+    ext_table.add_column("Type", style="cyan")
+    ext_table.add_column("P&L", justify="right")
+    ext_table.add_column("Z-Score", justify="right")
 
-    # 6. Risk Dashboard
-    avg_vol = df['implied_vol'].mean()
-    risk_panel = Panel(
-        f"Avg Market Volatility: [bold cyan]{avg_vol:.2%}[/]\n"
-        f"Max Inventory Size: [bold white]10 Contracts[/]\n"
-        f"Trade Logic: [bold green]Long Calls & Long Puts[/]\n"
-        f"Mean Reversion: [bold magenta]Target Z=0[/]",
-        title="[bold red]Strategy Risk Parameters",
-        expand=False
-    )
-    console.print(risk_panel)
+    for i, (_, row) in enumerate(top_wins.iterrows()):
+        ext_table.add_row(f"Best #{i+1}", row['trade_type'].split()[0], color_pnl(row['pnl']), f"{row['macd_z']:.2f}")
+    
+    ext_table.add_row("---", "---", "---", "---") # Separator
+
+    for i, (_, row) in enumerate(top_losses.iterrows()):
+        ext_table.add_row(f"Worst #{i+1}", row['trade_type'].split()[0], color_pnl(row['pnl']), f"{row['macd_z']:.2f}")
+
+    console.print(ext_table)
+
+    # 6. Conclusion Panel
+    final_equity = df['cumulative_pnl'].iloc[-1] if not df.empty else 0
+    console.print(Panel(
+        f"Final Simulated Equity Change: {color_pnl(final_equity)}\n"
+        f"Based on fixed contract scaling (Max 10).",
+        title="Account Simulation", border_style="green" if final_equity > 0 else "red"
+    ))
 
 if __name__ == "__main__":
-    analyze_dual_direction_results()
+    analyze_financial_results()

@@ -17,7 +17,7 @@ console = Console()
 # --- SETTINGS ---
 SYMBOL = "AMD"
 POLYGON_API_KEY = os.getenv("POLYGON_API_KEY")
-LOOKBACK_DAYS = 480              # Set to 180 days for a more robust dataset
+LOOKBACK_DAYS = 180
 TARGET_EXPIRY_DAYS = 7
 RISK_FREE_RATE = 0.045
 CACHE_FILE = f"{SYMBOL}_historical_data_cache.csv"

@@ -14,6 +14,7 @@ def train_options_model():
     """
     Trains an XGBoost classifier for Dual-Direction Mean Reversion.
     Learns to predict success for both Put (Overbought) and Call (Oversold) campaigns.
+    Now includes Financial P&L Analysis.
     """
     file_path = "historical_training_data.csv"
     
@@ -29,13 +30,20 @@ def train_options_model():
         return
 
     # 2. Define Features
-    features = ['atr', 'mins_open', 'macd_z', 'vol_z', 'implied_vol']
-    X = df[features]
+    # We temporarily include 'pnl' in X to carry it through the split, then remove it before training
+    model_features = ['atr', 'mins_open', 'macd_z', 'vol_z', 'implied_vol']
+    
+    # Check if PnL data exists (backward compatibility)
+    has_pnl = 'pnl' in df.columns
+    
+    if has_pnl:
+        X = df[model_features + ['pnl']]
+    else:
+        X = df[model_features]
+        
     y = df['target']
 
     # 3. Dynamic Stratification Check
-    # We check if we have at least 2 members of each class (0 and 1)
-    # If not, stratify=y will fail, so we disable it.
     class_counts = y.value_counts()
     can_stratify = all(count >= 2 for count in class_counts) and len(class_counts) > 1
 
@@ -46,17 +54,28 @@ def train_options_model():
         stratify_param = y
 
     # 4. Train/Test Split
-    X_train, X_test, y_train, y_test = train_test_split(
+    X_train_full, X_test_full, y_train, y_test = train_test_split(
         X, y, test_size=0.2, random_state=42, stratify=stratify_param
     )
 
-    # 5. Handle Class Imbalance
-    # Avoid division by zero if there are no wins or no losses
+    # 5. Separation: Isolate PnL for analysis and Features for training
+    if has_pnl:
+        # Save PnL series for financial audit
+        test_pnl = X_test_full['pnl']
+        
+        # Drop PnL from the datasets used for the model
+        X_train = X_train_full.drop(columns=['pnl'])
+        X_test = X_test_full.drop(columns=['pnl'])
+    else:
+        X_train = X_train_full
+        X_test = X_test_full
+
+    # 6. Handle Class Imbalance
     num_wins = sum(y == 1)
     num_losses = sum(y == 0)
     scale_pos_weight = num_losses / num_wins if num_wins > 0 else 1
 
-    # 6. Model Configuration
+    # 7. Model Configuration & Training
     model = xgb.XGBClassifier(
         n_estimators=300,
         max_depth=6,
@@ -70,20 +89,17 @@ def train_options_model():
     console.print(f"[yellow]Training Dual-Direction Brain on {len(X_train)} campaigns...")
     model.fit(X_train, y_train)
 
-    # 7. Performance Audit
+    # 8. Performance Audit (Classification Metrics)
     y_pred = model.predict(X_test)
     
     accuracy = accuracy_score(y_test, y_pred)
-    # Use zero_division=0 to prevent errors if a class is missing in the test set
     report = classification_report(y_test, y_pred, output_dict=True, zero_division=0)
     cm = confusion_matrix(y_test, y_pred)
 
-    # Results UI
-    audit_table = Table(title="[bold cyan]XGBoost Model Audit: Dual-Direction Scaling")
+    audit_table = Table(title="[bold cyan]XGBoost Model Audit: Classification Metrics")
     audit_table.add_column("Metric", style="white")
     audit_table.add_column("Value", style="bold magenta")
 
-    # Handle potentially missing keys in report
     target_key = '1' if '1' in report else ('1.0' if '1.0' in report else None)
     
     audit_table.add_row("Overall Accuracy", f"{accuracy:.2%}")
@@ -96,7 +112,44 @@ def train_options_model():
     
     console.print(audit_table)
 
-    # 8. Directional Sensitivity Analysis
+    # 9. Financial P&L Audit (New Section)
+    if has_pnl:
+        # Calculate PnL for trades the model accepted (prediction == 1)
+        accepted_mask = (y_pred == 1)
+        model_pnl = test_pnl[accepted_mask].sum()
+        trades_taken = accepted_mask.sum()
+        avg_model_pnl = test_pnl[accepted_mask].mean() if trades_taken > 0 else 0
+        
+        # Calculate Baseline (taking every trade in the test set)
+        baseline_pnl = test_pnl.sum()
+        
+        def color_money(val):
+            return f"[green]+${val:,.2f}[/]" if val > 0 else f"[red]-${abs(val):,.2f}[/]"
+
+        fin_table = Table(title="[bold green]Test Set Financial Simulation (Out-of-Sample)[/]")
+        fin_table.add_column("Metric", style="white")
+        fin_table.add_column("Model Selected", justify="right", style="bold green")
+        fin_table.add_column("Baseline (All Trades)", justify="right", style="dim white")
+        
+        fin_table.add_row(
+            "Total P&L", 
+            color_money(model_pnl), 
+            color_money(baseline_pnl)
+        )
+        fin_table.add_row(
+            "Avg P&L / Trade", 
+            color_money(avg_model_pnl), 
+            color_money(test_pnl.mean())
+        )
+        fin_table.add_row(
+            "Trades Executed", 
+            str(trades_taken), 
+            str(len(X_test))
+        )
+        
+        console.print(fin_table)
+
+    # 10. Directional Sensitivity Analysis
     X_test_with_target = X_test.copy()
     X_test_with_target['actual'] = y_test
     X_test_with_target['pred'] = y_pred
@@ -117,8 +170,8 @@ def train_options_model():
         
     console.print(sense_table)
 
-    # 9. Feature Importance
-    importance = pd.Series(model.feature_importances_, index=features).sort_values(ascending=False)
+    # 11. Feature Importance
+    importance = pd.Series(model.feature_importances_, index=model_features).sort_values(ascending=False)
     imp_table = Table(title="[bold white]Feature Importance")
     imp_table.add_column("Feature", style="cyan")
     imp_table.add_column("Weight", style="magenta")
@@ -126,7 +179,7 @@ def train_options_model():
         imp_table.add_row(feat, f"{val:.4f}")
     console.print(imp_table)
 
-    # 10. Save the Model
+    # 12. Save the Model
     joblib.dump(model, "amd_model.pkl")
     console.print(Panel(f"[bold green]Success![/] Model calibrated and saved as 'amd_model.pkl'\n"
                         f"Confusion Matrix: [ {cm[0][0]} {cm[0][1] if len(cm[0])>1 else 0} ] (TN, FP)\n"

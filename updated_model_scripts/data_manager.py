@@ -34,13 +34,13 @@ class DataManager:
             try:
                 df = pd.read_csv(self.cache_file, index_col=0, parse_dates=True)
                 
-                # CHECK FOR STALE CACHE (Missing new Confluence Metrics)
-                required = ['atr', 'hurst', 'ou_theta', 'macd_z', 'rsi']
+                # CHECK FOR STALE CACHE (Missing VWAP/ADX)
+                required = ['atr', 'macd_z', 'rsi', 'dist_vwap', 'adx']
                 missing = [c for c in required if c not in df.columns]
                 
                 if missing:
                     console.print(f"[yellow]Cache is missing columns {missing}. Regenerating features...[/]")
-                    if {'Close', 'High', 'Low'}.issubset(df.columns):
+                    if {'Close', 'High', 'Low', 'Volume'}.issubset(df.columns):
                         df = self.apply_physics_features(df)
                         df.to_csv(self.cache_file)
                     else:
@@ -92,7 +92,7 @@ class DataManager:
         return df
 
     def apply_physics_features(self, df):
-        console.print("[cyan]Calculating Physics, ATR & Technicals...[/]")
+        console.print("[cyan]Calculating Physics, VWAP & ADX...[/]")
         window = 60
         
         # 1. Volatility & ATR
@@ -104,11 +104,10 @@ class DataManager:
         low_close = np.abs(df['Low'] - df['Close'].shift())
         df['atr'] = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1).rolling(14).mean()
 
-        # 2. Classic Technicals (MACD & RSI) for Confluence
+        # 2. Classic Technicals (MACD & RSI)
         ema_12 = df['Close'].ewm(span=12, adjust=False).mean()
         ema_26 = df['Close'].ewm(span=26, adjust=False).mean()
         macd = ema_12 - ema_26
-        # Z-Score of MACD to normalize it
         df['macd_z'] = (macd - macd.rolling(60).mean()) / macd.rolling(60).std()
         
         delta = df['Close'].diff()
@@ -117,7 +116,12 @@ class DataManager:
         rs = gain / loss
         df['rsi'] = 100 - (100 / (1 + rs))
 
-        # 3. Physics (Hurst/OU)
+        # 3. NEW SOTA FEATURES: VWAP & ADX
+        df['vwap'] = MarketPhysics.calculate_vwap(df)
+        df['dist_vwap'] = (df['Close'] - df['vwap']) / df['vwap'] # Percentage distance
+        df['adx'] = MarketPhysics.calculate_adx(df)
+
+        # 4. Physics (Hurst/OU)
         closes = df['Close'].values
         hursts, thetas, mus = [0.5]*window, [0.0]*window, [closes[0]]*window
         

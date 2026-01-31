@@ -19,8 +19,8 @@ def train():
         console.print("[red]Not enough data to train.[/]")
         return
     
-    # UPDATED FEATURES: Added MACD_Z and RSI
-    features = ['hurst', 'theta', 'z_score', 'macd_z', 'rsi', 'volatility', 'atr', 'hour']
+    # UPDATED FEATURES: Added dist_vwap and adx
+    features = ['hurst', 'theta', 'z_score', 'macd_z', 'rsi', 'dist_vwap', 'adx', 'vol_z', 'volatility', 'atr', 'hour']
     X = df[features]
     y = df['target']
     
@@ -34,21 +34,20 @@ def train():
         scale_pos_weight=(len(y_train[y_train==0]) / len(y_train[y_train==1]))
     )
     
-    console.print(f"[yellow]Training on {len(X_train)} campaigns with Ensemble Features...[/]")
+    console.print(f"[yellow]Training on {len(X_train)} campaigns with VWAP & ADX...[/]")
     model.fit(X_train, y_train)
     
     preds = model.predict(X_test)
     acc = accuracy_score(y_test, preds)
     prec = precision_score(y_test, preds)
     
-    # Financial Analysis
     test_indices = y_test.index
     test_pnl = df.loc[test_indices, 'pnl']
     model_trades = test_pnl[preds == 1]
     model_total_pnl = model_trades.sum()
     avg_trade_val = model_trades.mean() if len(model_trades) > 0 else 0
     
-    table = Table(title="Real-World Ensemble Brain Audit")
+    table = Table(title="SOTA Brain + VWAP Audit")
     table.add_column("Metric", style="cyan")
     table.add_column("Value", style="bold magenta")
     
