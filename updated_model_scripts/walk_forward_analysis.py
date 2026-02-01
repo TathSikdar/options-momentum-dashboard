@@ -110,25 +110,44 @@ class WalkForwardAnalyzer:
             engine = BacktestEngine(df_test, config_override=best_params)
             oos_pnl = engine.run_simulation(silent=True)
             
+            # EXTRACT RISK METRICS FROM ENGINE
+            max_dd = 0.0
+            profit_factor = 0.0
+            
+            if engine.results is not None and not engine.results.empty:
+                res = engine.results
+                res['cum_pnl'] = res['pnl'].cumsum()
+                res['peak'] = res['cum_pnl'].cummax()
+                res['drawdown'] = res['cum_pnl'] - res['peak']
+                max_dd = res['drawdown'].min()
+                
+                wins = res[res['pnl'] > 0]['pnl'].sum()
+                losses = abs(res[res['pnl'] <= 0]['pnl'].sum())
+                profit_factor = wins / losses if losses > 0 else 99.9
+            
             # Record Results
             results.append({
                 "Period": f"{train_end.strftime('%Y-%m-%d')} -> {test_end.strftime('%m-%d')}",
-                "IS_PnL": is_pnl,       # Predicted P&L (Expectation)
-                "OOS_PnL": oos_pnl,     # Actual P&L (Reality)
-                "Robustness": oos_pnl / is_pnl if is_pnl > 0 else 0.0
+                "IS_PnL": is_pnl,       
+                "OOS_PnL": oos_pnl,     
+                "Robustness": oos_pnl / is_pnl if is_pnl > 0 else 0.0,
+                "Max_DD": max_dd,
+                "PF": profit_factor
             })
             
             color = "green" if oos_pnl > 0 else "red"
-            console.print(f" > Result: In-Sample P&L: ${is_pnl:.0f} | Out-of-Sample P&L: [{color}]${oos_pnl:.0f}[/]")
+            console.print(f" > Result: P&L: [{color}]${oos_pnl:.0f}[/] | Max DD: [red]${max_dd:.0f}[/]")
 
         # --- FINAL REPORT ---
         res_df = pd.DataFrame(results)
         
         table = Table(title="Walk-Forward Analysis Report")
         table.add_column("Test Period", style="cyan")
-        table.add_column("Predicted P&L (IS)", justify="right")
-        table.add_column("Actual P&L (OOS)", justify="right", style="bold")
-        table.add_column("Robustness Ratio", justify="right")
+        table.add_column("Predicted", justify="right")
+        table.add_column("Actual P&L", justify="right", style="bold")
+        table.add_column("Robustness", justify="right")
+        table.add_column("Max DD", justify="right", style="red")
+        table.add_column("PF", justify="right")
         
         total_oos_pnl = 0
         total_is_pnl = 0
@@ -143,7 +162,9 @@ class WalkForwardAnalyzer:
                 row['Period'],
                 f"${row['IS_PnL']:,.0f}",
                 f"[{r_color}]${row['OOS_PnL']:,.0f}[/]",
-                f"[{rob_color}]{row['Robustness']:.2f}[/]"
+                f"[{rob_color}]{row['Robustness']:.2f}[/]",
+                f"${row['Max_DD']:,.0f}",
+                f"{row['PF']:.2f}"
             )
             
         console.print("\n")

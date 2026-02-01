@@ -2,6 +2,8 @@ import pandas as pd
 import numpy as np
 import json
 from rich.console import Console
+from rich.table import Table
+from rich.panel import Panel
 from data_manager import DataManager
 from market_physics import MarketPhysics
 
@@ -10,6 +12,7 @@ console = Console()
 class BacktestEngine:
     def __init__(self, df, config_override=None):
         self.df = df
+        self.results = None # Store results for external access
         
         try:
             with open("strategy_config.json", "r") as f:
@@ -23,7 +26,7 @@ class BacktestEngine:
                 "STOP_LOSS_ATR": 3.0,
                 "SCALE_IN_ATR": 1.0,
                 "MAX_CONTRACTS": 5,
-                "TARGET_EXPIRY_DAYS": 4,
+                "TARGET_EXPIRY_DAYS": 4, # Used as a fallback preference
                 "INITIAL_SIZE": 1
             }
             
@@ -55,7 +58,6 @@ class BacktestEngine:
         SIGMA_ENTRY = self.config.get('SIGMA_ENTRY', 2.0)
         
         # Main Loop
-        # We still iterate normally here as entry conditions are sparse
         for i in range(len(self.df) - 240): 
             row = self.df.iloc[i]
             
@@ -84,6 +86,7 @@ class BacktestEngine:
             if direction:
                 pnl = self.simulate_campaign(i, direction)
                 trades.append({
+                    'entry_time': ts,
                     'regime': row['regime'],
                     'hurst': row['hurst'],
                     'theta': row['ou_theta'],
@@ -105,31 +108,83 @@ class BacktestEngine:
             return 0.0
 
         res_df = pd.DataFrame(trades)
+        self.results = res_df # Save for external access
         
         if not silent:
             res_df.to_csv("sota_training_data.csv", index=False)
+            self.print_advanced_stats(res_df)
         
-        total_pnl = res_df['pnl'].sum()
-        win_rate = res_df['target'].mean()
+        return res_df['pnl'].sum()
+
+    def print_advanced_stats(self, df):
+        # 1. Basic P&L
+        total_pnl = df['pnl'].sum()
+        win_rate = df['target'].mean()
         
-        if not silent:
-            console.print(f"[green]Backtest Complete.[/]")
-            console.print(f"Total P&L: [bold]${total_pnl:.2f}[/]")
-            console.print(f"Win Rate: [bold]{win_rate:.1%}[/]")
-            
-        return total_pnl
+        # 2. Risk Metrics
+        df['cum_pnl'] = df['pnl'].cumsum()
+        df['peak'] = df['cum_pnl'].cummax()
+        df['drawdown'] = df['cum_pnl'] - df['peak']
+        max_drawdown = df['drawdown'].min()
+        
+        # 3. Trade Quality
+        wins = df[df['pnl'] > 0]['pnl']
+        losses = df[df['pnl'] <= 0]['pnl']
+        avg_win = wins.mean() if len(wins) > 0 else 0
+        avg_loss = losses.mean() if len(losses) > 0 else 0
+        profit_factor = abs(wins.sum() / losses.sum()) if losses.sum() != 0 else float('inf')
+        
+        # 4. SQN (System Quality Number)
+        # SQN = (Expectancy / StdDev) * Sqrt(N)
+        n_trades = len(df)
+        if n_trades > 1:
+            pnl_std = df['pnl'].std()
+            avg_pnl = df['pnl'].mean()
+            sqn = (avg_pnl / pnl_std) * np.sqrt(n_trades) if pnl_std != 0 else 0
+        else:
+            sqn = 0
+
+        # Display
+        table = Table(title="SOTA Strategy Performance Audit", border_style="bold green")
+        table.add_column("Metric", style="cyan")
+        table.add_column("Value", style="bold white")
+        table.add_column("Verdict", style="italic")
+
+        table.add_row("Total P&L", f"${total_pnl:,.2f}", "[green]PROFITABLE[/]" if total_pnl > 0 else "[red]LOSS[/]")
+        table.add_row("Win Rate", f"{win_rate:.1%}", "Target > 55%")
+        table.add_row("Profit Factor", f"{profit_factor:.2f}", "[green]EXCELLENT[/]" if profit_factor > 1.5 else "NEEDS WORK")
+        table.add_row("Max Drawdown", f"[red]${max_drawdown:,.2f}[/]", "Risk Exposure")
+        table.add_row("Avg Win", f"${avg_win:.2f}", "")
+        table.add_row("Avg Loss", f"[red]${avg_loss:.2f}[/]", "")
+        table.add_row("Risk/Reward Ratio", f"{abs(avg_win/avg_loss):.2f}", "Target > 1.5")
+        table.add_row("SQN Score", f"{sqn:.2f}", "Easier to trade > 2.0")
+        table.add_row("Total Trades", f"{n_trades}", "Sample Size")
+
+        console.print(table)
 
     def simulate_campaign(self, idx, direction):
         """
         Executes a trade using Numpy Optimization for speed.
+        Forcefully simulates Wealthsimple constraints (Next Friday Expiry).
         """
         entry_row = self.df.iloc[idx]
         strike = round(entry_row['Close'])
-        target_days = self.config.get('TARGET_EXPIRY_DAYS', 4)
-        t_start = target_days / 365
         rf = self.config.get('RISK_FREE_RATE', 0.045)
         bs_vol = entry_row['volatility']
         atr = entry_row['atr']
+        
+        # --- WEALTHSIMPLE CONSTRAINT LOGIC ---
+        # Calculate actual DTE to next Friday
+        entry_date = entry_row.name
+        # Weekday: Mon=0, Fri=4
+        days_ahead = 4 - entry_date.weekday()
+        if days_ahead <= 0: # If today is Friday or Weekend, push to next week
+            days_ahead += 7
+        
+        # Actual Time to Expiry (in Years) for BS Model
+        # We start with 'days_ahead' as our rigid contract duration
+        actual_dte_days = days_ahead
+        t_start = actual_dte_days / 365.0
         
         # Scaling Params
         MAX_CONTRACTS = self.config.get('MAX_CONTRACTS', 5)
@@ -158,8 +213,14 @@ class BacktestEngine:
         for j, (ts, row) in enumerate(zip(future_times, future_data)):
             curr_close = row[CLOSE]
             
-            # Calculate Option Price
-            t_curr = (target_days - ((j+1)/390)) / 365
+            # Calculate Option Price based on DECAY of the FRIDAY contract
+            # We are j+1 minutes into the trade
+            # t_curr = (Original Days - (Minutes Elapsed / MinsInDay)) / 365
+            t_curr = (actual_dte_days - ((j+1)/390.0)) / 365.0
+            
+            if t_curr <= 0: # Expiry Hit
+                return (max(0, curr_close - strike) if opt_type == 'call' else max(0, strike - curr_close)) * contracts * 100 - total_cost
+
             curr_opt_price = MarketPhysics.get_bs_price(curr_close, strike, t_curr, rf, bs_vol, opt_type)
             current_net_value = (curr_opt_price * contracts * 100)
             
